@@ -1,5 +1,10 @@
-//not in use yet
-//exec("./datetime.cs");
+//$IDLoggerPref::*
+//$StatsGuiPref::*
+
+if(isObject(statsPane_Players))
+	deactivatePackage("IDLogger");
+
+exec("./gui.cs");
 
 $IDLoggerPref::DisableEcho = 0;
 $IDLoggerPref::NoExport = 0;
@@ -19,7 +24,8 @@ package IDLogger
 		%text = NPL_List.getRowTextById(%rowID); 
 		%id = getField(%text,3);
 		
-		echo("ID Logger - Dropping client \"" @ %name @ "\". ID: " @ %id);
+		if(!$IDLoggerPref::DisableEcho)
+			echo("ID Logger - Dropping client \"" @ %name @ "\". ID: " @ %id);
 		
 		// Make sure we have the right name.
 		if($IDLogger::Name[$IDLogger::SessionID[%id]] !$= %name)
@@ -154,9 +160,7 @@ package IDLogger
 			// Always echo this
 			echo($IDLogger::IDsExported SPC "IDs exported;" SPC $IDLogger::NamesExported SPC "names exported");
 			if($IDLogger::ManualIDs)
-			{
 				echo($IDLogger::ManualIDs SPC "IDs rejected");
-			}
 			
 			%file.delete();
 			deleteVariables("$IDLogger::*"); // Once everything is exported, we need to clear it
@@ -169,9 +173,6 @@ package IDLogger
 	}
 };
 
-if($IDLogger)
-	deactivatePackage("IDLogger");
-
 activatePackage("IDLogger");
 $IDLogger = 1;
 
@@ -181,6 +182,7 @@ function IDLogger_Init()
 		$IDLogger::TotalSessionIDs = 0;
 	
 	%file = new fileobject();
+	$IDLogger::FileCount = getFileCount("config/client/logs/idlog/ids/*");
 	
 	if(isFile("config/client/logs/idlog/HighestID.log"))
 	{
@@ -223,6 +225,7 @@ function IDLogger_Init()
 		}
 		
 		$IDLogger::VersionExport = %versionNew;
+		
 		echo("The highest logged ID is" SPC $IDLogger::HighestID @ "!" SPC %echo);
 	}
 	else
@@ -231,10 +234,17 @@ function IDLogger_Init()
 		$IDLogger::HighestID = 0;
 	}
 	
-	if(isFile("config/client/idlog/HighestID.log") || getFileCount("config/client/idlog/ids/*") > 0) // Because everything was moved from config/idlog to config/logs/idlog
+	if(isFile("config/client/idlog/HighestID.log")) // Because everything was moved from config/idlog to config/logs/idlog
 		error("There are files in the old idlog folder. Please move these to the new folder (config/client/logs/idlog)");
 	
+	$IDLogger::FileCount = getFileCount("config/client/logs/idlog/ids/*");
 	%file.delete();
+	
+	if(!$Pref::IDLogger::DisableAutoLoad) // Load up the list of names
+	{
+		statsGui_PL_ClickRefresh();
+		StatsGui_PL_SearchStart();
+	}
 }
 
 function IDLogger_PlaytimeStartID(%id)
@@ -371,9 +381,7 @@ function isValidBLID(%id)
 function IDLogger_LogID(%name,%id,%date)
 {
 	if(!$IDLoggerPref::DisableEcho)
-	{
 		echo("ID Logger - Registering name \"" @ %name @ "\" to id " @ %id);
-	}
 	
 	if(%date && isFile("config/client/logs/idlog/ids/" @ %id @ ".log"))
 	{
@@ -427,9 +435,7 @@ function IDLogger_LogID(%name,%id,%date)
 	if(%id > $IDLogger::HighestID)
 	{
 		if(!$IDLoggerPref::DisableEcho)
-		{
 			echo("Highest ID updated! (" @ %id @ " > " @ $IDLogger::HighestID @ ")");
-		}
 		$IDLogger::HighestID = %id;
 	}
 	
@@ -582,12 +588,13 @@ function IDLogger_FindSessionIDByName(%name,%exact,%returnCount)
 
 //// TO DO: name history searching. (use the ids folder for the loop in case name history files are missing)
 // This function will search the log files for %name. Arguments are the same as IDLogger_FindSessionIDByName.
-// When %repeat is set to 1, %callback will be called each time instead of when the search is complete. The result will only contain the last found ID.
+// When %repeat is set to 1, %callback will be called each time a match is found instead of when the search is complete. The result will only contain the last found ID.
 // %returnCount is how many IDs you want to return. Setting it to 0 returns all of them. (WARNING: Returning more than 255 may cause the game to close.)
-// The result is "returned" with %callback, where "%1" will be replaced by the result and "%i" will be replaced with the increment.
+// Callback syntax: Quotation marks are included, don't add your own. Format: %inc = increment; %blid = BLID; %name = name; %seen = seen
+// The result is "returned" with %callback. Example: "echo(\"Found player named %n with ID %id, last seen on %s.\");"
 // This cannot be used to search name history logs yet.
-// WARNING: The game may close if this function returns 255 or more IDs at once.
-function IDLogger_SearchFiles(%name,%exact,%returnCount,%callback,%repeat,%delay)
+// WARNING: The game may close if this function returns 255 or more IDs at once with %repeat off.
+function IDLogger_SearchFiles(%name,%exact,%returnCount,%callback,%repeat,%delay,%failCallback)
 {
 	if(%delay < 0)
 		%delay = 0;
@@ -595,10 +602,10 @@ function IDLogger_SearchFiles(%name,%exact,%returnCount,%callback,%repeat,%delay
 	cancel($IDLogger::SearchLoop);
 	%file = new fileobject();
 
-	$IDLogger::SearchLoop = schedule(%delay,0,IDLogger_FileSearchLoop,%i,%name,%exact,%returnCount,%callback,%repeat,%file,%firstFile,%return,%delay);
+	$IDLogger::SearchLoop = schedule(%delay,0,IDLogger_FileSearchLoop,%i,%name,%exact,%returnCount,%callback,%failCallback,%repeat,%file,%firstFile,%return,%delay);
 }
 
-function IDLogger_FileSearchLoop(%i,%name,%exact,%returnCount,%callback,%repeat,%file,%firstFile,%return,%delay)
+function IDLogger_FileSearchLoop(%i,%name,%exact,%returnCount,%callback,%failCallback,%repeat,%file,%firstFile,%return,%delay,%idCount)
 {
 	%folder = "ids";
 	
@@ -611,78 +618,118 @@ function IDLogger_FileSearchLoop(%i,%name,%exact,%returnCount,%callback,%repeat,
 	else
 		%currentFile = findNextFile("config/client/logs/idlog/" @ %folder @ "/*");
 	
-	%fileBLID = strreplace(%currentFile,"config/client/logs/idlog/" @ %folder @ "/","");
-	%fileBLID = strreplace(%fileBLID,".log","");
+	%blidFile = strreplace(%currentFile,"config/client/logs/idlog/" @ %folder @ "/","");
+	%blidFile = strreplace(%blidFile,".log","");
 	
 	%file.openForRead(%currentFile);
-	%nameFile = strupr(%file.readLine());
+	%nameFile = %file.readLine();
+	%seenFile = strReplace(%file.readLine(),"Last seen: ","");
 	%file.close();
 	
 	%returnThis = 0;
 	if(%exact)
 	{
-		if(%nameFile $= strUpr(%name))
+		if(strUpr(%nameFile) $= strUpr(%name))
 			%returnThis = 1;
 	}
 	else
 	{
-		if(strstr(%nameFile,strUpr(%name)) >= 0)
+		if(strstr(strUpr(%nameFile),strUpr(%name)) >= 0)
 			%returnThis = 1;
 	}
 	
-	if(%returnThis)
+	if(%returnThis && %callback !$= "") // We are "returning" the information
 	{
 		if(%repeat) // Repeat means we only need the current ID.
 		{
-			%return = %fileBLID;
+			%return = %blidFile;
+			%returnName = %nameFile;
+			%returnSeen = %seenFile;
 		}
 		else
 		{
 			if(%return $= "") // Avoid a blank space at the beginning
-				%return = %fileBLID;
+			{
+				%return = %blidFile;
+				%returnName = %nameFile;
+				%returnSeen = %seenFile;
+			}
 			else
-				%return = %return SPC %fileBLID; // Warning: The game can close when the word count reaches 255
+			{
+				%return = %return SPC %blidFile; // Warning: The game may close when the word count reaches 255
+				%returnName = %returnName SPC %nameFile;
+				%returnSeen = %returnSeen SPC %seenFile;
+			}
+		}
+		
+		if(%i > $IDLogger::FileCount || %currentFile $= %firstFile && %i != 1) // Reached the last file.
+		{
+			%file.delete();
+			return %return;
+		}
+		
+		// Might add a way to disable these if it speeds things up.
+		%str = strreplace(%callback,"%blid","\"" @ %return @ "\"");
+		%str = strreplace(%str,"%inc","\"" @ %i @ "\"");
+		%str = strreplace(%str,"%name","\"" @ %returnName @ "\"");
+		%str = strreplace(%str,"%seen","\"" @ %returnSeen @ "\"");
+		
+		if(%repeat)
+		{
+			eval(%str);
+			%evalDone = 1;
+			%idCount++;
+		}
+		
+		if(%returnCount > 0 && %idCount >= %returnCount)
+		{
+			if(!%evalDone && %str !$= "")
+			{
+				eval(%str);
+				%evalDone = 1;
+				%idCount++;
+			}
+			
+			%file.delete();
+			return %return;
 		}
 	}
-	
-	%str = strreplace(%callback,"%i",%i);
-	%str = strreplace(%str,"%1",%return);
-	//echo(%fileBLID SPC %name SPC %nameFile SPC "|" SPC %return);
-	
-	if(%repeat)
+	else if(%failCallback !$= "") // If a callback is defined for when nothing is found.
 	{
+		%str = strreplace(%failCallback,"%inc",%i);
 		eval(%str);
 		%evalDone = 1;
 	}
 	
-	%wordCount = getWordCount(%return);
-	if(%returnCount > 0 && %wordCount >= %returnCount)
-	{
-		if(!%evalDone)
-		{
-			eval(%str);
-			%evalDone = 1;
-		}
-		
-		%file.delete();
-		return %return;
-	}
-	
-	if(%i != 1 && %currentFile $= %firstFile)
-	{
-		if(!%evalDone)
-		{
-			eval(%str);
-			%evalDone = 1;
-		}
-		
-		%file.delete();
-		return %return;
-	}
-
-	$IDLogger::SearchLoop = schedule(%delay,0,IDLogger_FileSearchLoop,%i,%name,%exact,%returnCount,%callback,%repeat,%file,%firstFile,%return,%delay);
+	$IDLogger::SearchLoop = schedule(%delay,0,IDLogger_FileSearchLoop,%i,%name,%exact,%returnCount,%callback,%failCallback,%repeat,%file,%firstFile,%return,%delay,%idCount);
 }
 
+// Fix for missing name history files.
+function IDLogger_FixNameHistoryFiles()
+{
+	%file = new fileObject();
+	%count = getFileCount("config/client/logs/idlog/ids/*");
+	
+	for(%i = 1; %i <= %count; %i++)
+	{
+		if(%i == 1)
+			%currentFile = findFirstFile("config/client/logs/idlog/ids/*");
+		else
+			%currentFile = findNextFile("config/client/logs/idlog/ids/*");
+		
+		%blidFile = strreplace(%currentFile,"config/client/logs/idlog/ids/","");
+		
+		if(!isFile("config/client/logs/idlog/names/" @ %blidFile))
+		{
+			// Code to create name log here
+			// This might be a bad idea. It would probably be better to only create a name log when necessary. (The only problem is that this would require changes to the original code)
+		}
+	}
+	
+	%file.delete();
+}
+
+IDLogger_Init();
 /////Console Functions/////
 function IDLogger_ViewStats(%id)
 {
@@ -761,5 +808,3 @@ function IDLogger_Search(%name,%clipboard,%callback)
 	
 	IDLogger_SearchFiles(%name,0,250,%callback,0,0);
 }
-
-IDLogger_Init();
