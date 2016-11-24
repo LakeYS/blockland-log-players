@@ -1,0 +1,3 @@
+Title: ID Logger
+Author: LakeYS
+A client-sided ID logger
